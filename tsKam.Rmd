@@ -1,0 +1,320 @@
+
+---
+title: "Time Series Analysis"
+author: "Kamila Tukhvatullina"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+#install.packages("openxlsx")
+library(openxlsx)
+```
+
+we're using this library to correctly read the file with dataset 
+
+```{r}
+elec_train = read.xlsx("/Users/kamila/Downloads/Elec-train.xlsx", colNames = TRUE)
+library(data.table)
+nms <- c("TimeS","Power", "Temp")
+setnames(elec_train, nms)
+elec_train = elec_train[,c("Power", "Temp")]
+elecc = ts(elec_train[92:4507,], freq = 96)   #this was changed later on as I discovered day 1 doesn't have 96 observations
+head(elecc)
+```
+I've chosen frequncy = 96 as it's the amount of observations we get in a period of 1 day. Let's make a simple plot and see data that we have:
+
+```{r}
+plot.ts(elecc, main = "Pattern of Raw Data", ylab = "electricity", xlab = "Time")
+```
+- from the first glance we can alredy see a strong periodic pattern, trend is not evident here, might be very minor: to be checked
+```{r}
+library(forecast)
+#another (more beautiful) way of plotting data
+library(ggplot2) 
+autoplot(elecc) +
+      ggtitle('Electricity consumption over time') + xlab('time') +
+      ylab('consumption')
+```
+
+# see the pattern of the data, how many are missing
+```{r}
+#install.packages("mice")
+library(mice)
+md.pattern(elecc)
+```
+indeed, we're missing a day of electricity consumption data. We're not going to use mice library for this, but we will predict the data with time series forecasting techniques. (btw we have reduced dataset to have full periods only, which means we deleted day 1 and the last day with no observations)
+```{r}
+require(forecast)
+```
+
+seasonality plot:
+```{r}
+elec_season = ts(elec_train$Power, freq = 96)
+ggseasonplot(elec_season,hour.labels= TRUE,hour.labels.left=TRUE)
+```
+data is very periodic: electricity consumption does not vary much from day to day
+
+let's see autocorrelation :
+```{r}
+el = elec_train$Power[92:4507]   #problem of missing values
+el_temp = elec_train$Temp[92:4507]
+acf(el)
+```
+there are significatnt autocorrelations almost everywhere, let's see what partial acf will show:
+
+```{r}
+pacf(el)
+```
+significant autocorrelation of 3d, 4th, 8,9 etc orders. 
+
+divide into train and test:
+
+```{r}
+el_only = ts(el, start=c(1, 6), freq=96)
+
+serie_train = window(el_only, start=c(1,6), end=c(47,96))
+serie_test = window(el_only, start=c(44,1), end=c(47,96))
+
+#serie_train=window(el_only,start=c(1,1),end=c(4,10))
+#serie_test=window(el_only,start=c(297,11),end=c(300,10))
+
+s_train=window(elecc,start=c(1,1),end=c(47,96))
+s_test=window(elecc,start=c(44,1),end=c(47,96))
+
+```
+let's apply H-W exponential smoothing model with no covariate:
+
+```{r}
+#fit=hw(serie_train,lambda="auto")
+#prev=forecast(fit,h=28)
+#autoplot(prev) + autolayer(serie_train, series="true data")+
+#autolayer(prev$mean, series="HW forecasts")
+#checkresiduals(fit)
+
+
+fit_hw = HoltWinters(serie_train, alpha=NULL, beta=NULL, gamma=NULL, seasonal='additive')
+
+prev=forecast(fit_hw, h=288) 
+autoplot(serie_test) + autolayer(prev$mean,series="HW additive without covariate")
+checkresiduals(fit_hw)
+library(Metrics)
+rmse(serie_test, prev$mean)
+```
+looks not bad! rmse = 26 with quite a big horizon 
+we will try to forecast with multi seasonal holt-winters too:
+```{r}
+multi_seasonal_hw = HoltWinters(serie_train, alpha=NULL, beta=NULL, gamma=NULL, seasonal='multi')
+
+prev1=forecast(multi_seasonal_hw, h=288) 
+autoplot(serie_test) + autolayer(prev1$mean,series="HW multi without covariate")
+checkresiduals(multi_seasonal_hw)
+```
+I'm surprised, it looks like not a bad forecast, although resuduals show there is a lot to improve. 
+```{r}
+#fit_hw$method
+#fit_hw$model
+```
+I used to change frequency and use hw function instead and it has other properties than HoltWinters. A lot of difficulties with horizon and frequency choice
+```{r}
+#install.packages(Metrics)
+#library("Metrics")
+rmse(serie_test, prev1$mean)
+```
+it's a bit worse than HW additive
+
+let's see also hw with dumped option:
+```{r}
+hd=holt(serie_train,h=96,alpha=NULL,beta=NULL,damped=TRUE)
+print(sqrt(mean((hd$mean-serie_test)^2)))
+```
+that's a terrible rmse :) we will not use damped version
+try ses:
+```{r}
+SES=ses(serie_train,h=288,alpha=NULL)
+print(sqrt(mean((SES$mean-serie_test)^2)))
+```
+much worse than H-W 
+
+Let's see SARIMA model:
+
+```{r}
+fit_sarima=auto.arima(s_train[,"Power"])
+previ=forecast(fit_sarima,h=96) 
+autoplot(serie_test)+autolayer(previ$mean,series="SARIMA without covariate")
+```
+
+```{r}
+print(sqrt(mean((previ$mean-s_test[,"Power"])^2)))
+```
+UPD: I came back here after I found a better manual model with a covariate to try it for power only.
+
+```{r}
+checkresiduals(fit_sarima)
+```
+we will need to treat seosonality in addition to treating trend.
+
+
+```{r}
+man_fit_sarima = Arima(s_train[,"Power"], order=c(6,0,0),seasonal = c(0,1,1))
+checkresiduals(man_fit_sarima) 
+man_sarima = forecast(man_fit_sarima,h=96)
+autoplot(serie_test)+autolayer(man_sarima$mean,series="SARIMA without covariate")
+```
+```{r}
+man_fit_sarima$aic
+```
+```{r}
+print(sqrt(mean((man_sarima$mean-s_test[,"Power"])^2)))
+```
+this forecast is best.
+
+Let's introduce the second variable in hope it will do it even better.
+
+We will use a dynamic regression model for forecasting electricity demand, using temperature covariate. The order of the ARIMA model for the residual part is automaticaly selected
+```{r}
+fit_both=auto.arima(s_train[,"Power"],xreg=s_train[,2])
+both=forecast(fit_both,h=288,xreg=s_test[,2])
+autoplot(s_test)+autolayer(both$mean)
+```
+
+```{r}
+print(sqrt(mean((both$mean-s_test[,"Power"])^2)))
+```
+We can see that introducing temperaturre as a covariate slightly improves results of forecast.
+
+according to RMSE best model is manually chosen SARIMA for now
+
+covariates allows us to improve the forecasting.
+But if we check the residual, there is still some autocorrelations:
+
+```{r}
+summary(fit_both)
+```
+
+```{r}
+checkresiduals(fit_both)
+```
+
+
+We shall treat data to get read of possible trend if there is any to then apply models.
+
+We can try to find a better model manually. Let’s have a look to the relationship between consumption and temperature
+
+```{r}
+plot(elecc[,"Temp"],
+     elecc[,"Power"], col = c("red", "blue"))
+ #with clours it's is easier for me to comprehend 
+plot(elecc[,"Temp"],
+     elecc[,"Power"])
+```
+In the class we saw y=x2 and it's a noticeable bowed shape. In this case it's not that evident but due to this separation into lower and upper part we can think of sigmoid function that could fit data
+
+```{r}
+hist(el, breaks = "scott")
+hist(el_temp, breaks = 'scott')
+```
+we might think that temperature is distrubuted normally, while electricity has basically 2 different clusters, that have almost equal picks.
+
+while thinking let's see if we can remove any effect of covariate
+
+```{r}
+ell=cbind(Power=s_train[,1],Temp=s_train[,2])
+fit_manual=tslm(Power~Temp+trend+season,data=s_train) 
+summary(fit_manual)
+```
+there's a trend and temperature look very significant. So many seasons that we need to treat before modelling data.
+
+```{r}
+checkresiduals(fit_manual)
+```
+
+Variance is too big, we shall address seasonality. We'll use Box Cox and log transformations
+
+```{r}
+plot(pacf(fit_manual$residuals))
+```
+PACF and SCF look like those of an AR5 model: exponential deacrease of the ACF and significant PCA at lag 5.We can see it's very periodic (for ACF): picks at 96, 192, 288 - it corresponds to our chosen frequency.This ACF suggest a seasonnal MA1 We can test it:
+
+
+```{r}
+tmp=fit_manual$residuals 
+fit3=Arima(tmp,order=c(5,0,0),seasonal = c(0,1,0)) 
+checkresiduals(fit3)
+```
+It definitely looks better, but still there are significant ACF that we can address.
+
+Residual have significant ACF at periodic lag (96). We will add a second order MA in the seasonal pattern:
+
+```{r}
+man_fit = Arima(s_train[,"Power"],xreg=s_train[,2], order=c(5,0,0),seasonal = c(0,1,1))
+checkresiduals(man_fit)
+```
+
+```{r}
+man_fit$aic
+```
+this AIC is better than the one obtained with auto.arima. We can suggest it will perform better in forecast.
+
+```{r}
+man_both=forecast(man_fit,h=288,xreg=s_test[,2])
+autoplot(s_test)+autolayer(man_both$mean)
+```
+looks good to me. Let's see RMSE of the obrained model:
+```{r}
+print(sqrt(mean((man_both$mean-s_test[,"Power"])^2)))
+```
+Great! It is better than auto-arima.
+
+We will try NNAR and it will be the last model:
+
+```{r}
+fit_NN=nnetar(s_train[,"Power"],xreg=s_train[,2])
+prevNN=forecast(fit_NN,h=96,xreg=s_test[,2])
+autoplot(s_test)+autolayer(prevNN$mean,series="NNAR using Temperature")
+```
+RMSE:
+```{r}
+print(sqrt(mean((prevNN$mean-s_test[,"Power"])^2)))
+```
+this forecast is worse than the one we obtained manually, We will produce a forecast using model called man_fit for Y with covariates and a model man_fit_sarima for univariate case.
+
+We obtain forecast for the case with Temp as covariate
+
+```{r}
+new_day <- elec_train$Temp[4508:4603]
+my_forecast=forecast(man_fit,h=96,xreg=new_day)
+my_forecast
+```
+
+and for univariate model:
+
+```{r}
+my_forecast_uni = forecast(man_fit_sarima, h=96)
+my_forecast_uni
+```
+
+```{r}
+a <- my_forecast$mean
+a
+
+
+b <- my_forecast_uni$mean
+b
+
+write(a, file = "myforecast_2",
+      ncolumns = 1,
+      append = FALSE, sep = " ")  #we have imported our forecasts
+```
+
+
+
+
+
+
+
+
+
+
+
